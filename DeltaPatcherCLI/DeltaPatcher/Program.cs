@@ -131,188 +131,200 @@ internal class Program
 
             ConsoleQuickEditSwitcher.SwitchQuickMode(false);
 
-            if (_winMode == DataWinMode.Droid)
+            switch (_winMode)
             {
-                if (_filesToPatch is null)
+                case DataWinMode.Droid:
                 {
-                    // if it's null, that means the user didn't specify anything with --files, so patch every available file
-                    _filesToPatch = [];
-                    if (File.Exists(Path.Join(gamePath, DataName)))
+                    var apktoolPath = Path.Join(Path.GetTempPath(), "apktool.jar");
+                    if (!File.Exists(apktoolPath))
                     {
-                        _filesToPatch.TryAdd("Menu", "");
+                        apktoolPath = Path.Join(Path.GetDirectoryName(Environment.ProcessPath)!, "apktool.jar");
                     }
 
-                    foreach (var dir in Directory.GetDirectories(gamePath, "chapter?_windows"))
+                    var files = new DirectoryInfo(gamePath).GetFiles("selector.apk")
+                        .Concat(new DirectoryInfo(gamePath).GetFiles("selector.pack"))
+                        .Concat(new DirectoryInfo(gamePath).GetFiles("chapter?_windows.apk"))
+                        .Concat(new DirectoryInfo(gamePath).GetFiles("chapter?_windows.pack"))
+                        .ToArray();
+
+                    if (_filesToPatch is null)
                     {
-                        if (!File.Exists(Path.Join(dir, DataName)))
+                        _filesToPatch = [];
+                        foreach (var file in files)
                         {
-                            continue;
+                            var split = file.Name.Split(".");
+                            _filesToPatch.TryAdd(
+                                split[0] == "selector"
+                                    ? "Menu"
+                                    : split[0].Replace("chapter", "Chapter").Replace("_windows", ""),
+                                file.Name);
                         }
-                        var dirName = dir.Split(Path.DirectorySeparatorChar)[^1];
-                        _filesToPatch.TryAdd(dirName.Replace("chapter", "Chapter").Replace("_windows", ""), dirName);
                     }
-                }
-                
-                foreach (var file in _filesToPatch) {
-                    var dataWin = file.Value == "" ? DataName : Path.Join(file.Value, DataName);
-                    if (_makeBackups) {
-                        MakeBackup(gamePath, dataWin);
-                    }
-                    await ApplyChapterPatch(gamePath, scriptsPath, file.Key, dataWin);
-                }
-            }
-            else if (_winMode == DataWinMode.Mac)
-            {
-                // if the user typed DELTARUNE.app as the path, append Contents Resources...
-                if (Path.GetExtension(gamePath)?.ToLowerInvariant() == ".app")
-                {
-                    gamePath = Path.Combine(gamePath, "Contents", "Resources");
-                }
-
-                if (_filesToPatch is null)
-                {
-                    // if it's null, that means the user didn't specify anything with --files, so patch every available file
-                    _filesToPatch = [];
-                    if (File.Exists(Path.Join(gamePath, DataName)))
+                    else
                     {
-                        _filesToPatch.TryAdd("Menu", "");
-                    }
-
-                    foreach (var dir in Directory.GetDirectories(gamePath, "chapter?_mac"))
-                    {
-                        if (!File.Exists(Path.Join(dir, DataName)))
+                        // check if selected files actually exist and add file extensions
+                        for (var i = _filesToPatch.Count - 1; i >= 0; i--)
                         {
-                            continue;
+                            var key = _filesToPatch.GetAt(i).Key;
+                            var match = false;
+                            foreach (var file in files)
+                            {
+                                var split = file.Name.Split(".");
+                                if (_filesToPatch[key] != split[0])
+                                {
+                                    continue;
+                                }
+                                _filesToPatch[key] += $".{split[1]}";
+                                match = true;
+                                break;
+                            }
+
+                            if (!match)
+                            {
+                                _filesToPatch.RemoveAt(i);
+                            }
                         }
-                        var dirName = dir.Split(Path.DirectorySeparatorChar)[^1];
-                        _filesToPatch.TryAdd(dirName.Replace("chapter", "Chapter").Replace("_mac", ""), dirName);
                     }
-                }
-                
-                foreach (var file in _filesToPatch) {
-                    var dataWin = file.Value == "" ? DataName : Path.Join(file.Value, DataName);
-                    if (_makeBackups) {
-                        MakeBackup(gamePath, dataWin);
-                    }
-                    await ApplyChapterPatch(gamePath, scriptsPath, file.Key, dataWin);
-                }
-            }
-            else if (_winMode == DataWinMode.Console)
-            {
-                // TODO: prompt the user to choose an nsz or somehow dump the game's RomFS here..?????
 
-                if (_filesToPatch is null)
+                    var translatedPath = Path.Join(gamePath, "translated");
+                    if (!Directory.Exists(translatedPath))
+                    {
+                        Directory.CreateDirectory(translatedPath);
+                    }
+
+                    foreach (var file in _filesToPatch)
+                    {
+                        var fileName = file.Value.Replace(".apk", "").Replace(".pack", "");
+                        var jarOutDir = Path.Join(gamePath, fileName);
+                        var assetsDir = Path.Join(fileName, "assets");
+
+                        if (_makeBackups) {
+                            MakeBackup(gamePath, file.Value);
+                        }
+
+                        RunCommand("java", "-jar " + $"{apktoolPath} d -r \"{Path.Join(gamePath, file.Value)}\" -o \"{jarOutDir}\" -f");
+                        await ApplyChapterPatch(gamePath, scriptsPath, file.Key, $"{Path.Join(assetsDir, DataName)}");
+                        RunCommand("java", "-jar " + $"{apktoolPath} b \"{jarOutDir}\" -o \"{Path.Join(translatedPath, file.Value)}\"");
+
+                        // Theoretically, it shouldn't be read-only, because it was created by "apktool"
+                        DeleteDirectoryNoRO(jarOutDir, true);
+                    }
+
+                    break;
+                }
+                case DataWinMode.Mac:
                 {
-                    // try to look for all available chapter patterns for consoles
-                    _filesToPatch = [];
-                    if (File.Exists(Path.Join(gamePath, DataName)))
+                    // if the user typed DELTARUNE.app as the path, append Contents Resources...
+                    if (Path.GetExtension(gamePath)?.ToLowerInvariant() == ".app")
                     {
-                        _filesToPatch.TryAdd("Menu", "");
+                        gamePath = Path.Combine(gamePath, "Contents", "Resources");
                     }
 
-                    // deltarune paths on consoles:
-                    var patterns = new Tuple<string, string>[] {
-                        Tuple.Create("chapter?_switch", "_switch"),
-                        Tuple.Create("chapter?_ps4", "_ps4"),
-                        Tuple.Create("chapter?_ps5", "_ps5") };
-                    foreach (var pattern in patterns)
+                    if (_filesToPatch is null)
                     {
-                        foreach (var dir in Directory.GetDirectories(gamePath, pattern.Item1))
+                        // if it's null, that means the user didn't specify anything with --files, so patch every available file
+                        _filesToPatch = [];
+                        if (File.Exists(Path.Join(gamePath, DataName)))
+                        {
+                            _filesToPatch.TryAdd("Menu", "");
+                        }
+
+                        foreach (var dir in Directory.GetDirectories(gamePath, "chapter?_mac"))
                         {
                             if (!File.Exists(Path.Join(dir, DataName)))
                             {
                                 continue;
                             }
                             var dirName = dir.Split(Path.DirectorySeparatorChar)[^1];
-                            _filesToPatch.TryAdd(dirName.Replace("chapter", "Chapter").Replace(pattern.Item2, ""), dirName);
+                            _filesToPatch.TryAdd(dirName.Replace("chapter", "Chapter").Replace("_mac", ""), dirName);
                         }
                     }
-                }
-
-                foreach (var file in _filesToPatch) {
-                    var dataWin = file.Value == "" ? DataName : Path.Join(file.Value, DataName);
-                    if (_makeBackups) {
-                        MakeBackup(gamePath, dataWin);
+                
+                    foreach (var file in _filesToPatch) {
+                        var dataWin = file.Value == "" ? DataName : Path.Join(file.Value, DataName);
+                        if (_makeBackups) {
+                            MakeBackup(gamePath, dataWin);
+                        }
+                        await ApplyChapterPatch(gamePath, scriptsPath, file.Key, dataWin);
                     }
-                    await ApplyChapterPatch(gamePath, scriptsPath, file.Key, dataWin);
+
+                    break;
                 }
-
-                // TODO: add logic to copy the LayeredFS mod???
-            }
-            else {
-                var apktoolPath = Path.Join(Path.GetTempPath(), "apktool.jar");
-                if (!File.Exists(apktoolPath))
+                case DataWinMode.Console:
                 {
-                    apktoolPath = Path.Join(Path.GetDirectoryName(Environment.ProcessPath)!, "apktool.jar");
-                }
+                    // TODO: prompt the user to choose an nsz or somehow dump the game's RomFS here..?????
 
-                var files = new DirectoryInfo(gamePath).GetFiles("selector.apk")
-                    .Concat(new DirectoryInfo(gamePath).GetFiles("selector.pack"))
-                    .Concat(new DirectoryInfo(gamePath).GetFiles("chapter?_windows.apk"))
-                    .Concat(new DirectoryInfo(gamePath).GetFiles("chapter?_windows.pack"))
-                    .ToArray();
-
-                if (_filesToPatch is null)
-                {
-                    _filesToPatch = [];
-                    foreach (var file in files)
+                    if (_filesToPatch is null)
                     {
-                        var split = file.Name.Split(".");
-                        _filesToPatch.TryAdd(
-                            split[0] == "selector"
-                                ? "Menu"
-                                : split[0].Replace("chapter", "Chapter").Replace("_windows", ""),
-                            file.Name);
-                    }
-                }
-                else
-                {
-                    // check if selected files actually exist and add file extensions
-                    for (var i = _filesToPatch.Count - 1; i >= 0; i--)
-                    {
-                        var key = _filesToPatch.GetAt(i).Key;
-                        var match = false;
-                        foreach (var file in files)
+                        // try to look for all available chapter patterns for consoles
+                        _filesToPatch = [];
+                        if (File.Exists(Path.Join(gamePath, DataName)))
                         {
-                            var split = file.Name.Split(".");
-                            if (_filesToPatch[key] != split[0])
+                            _filesToPatch.TryAdd("Menu", "");
+                        }
+
+                        // deltarune paths on consoles:
+                        var patterns = new Tuple<string, string>[] {
+                            Tuple.Create("chapter?_switch", "_switch"),
+                            Tuple.Create("chapter?_ps4", "_ps4"),
+                            Tuple.Create("chapter?_ps5", "_ps5") };
+                        foreach (var pattern in patterns)
+                        {
+                            foreach (var dir in Directory.GetDirectories(gamePath, pattern.Item1))
+                            {
+                                if (!File.Exists(Path.Join(dir, DataName)))
+                                {
+                                    continue;
+                                }
+                                var dirName = dir.Split(Path.DirectorySeparatorChar)[^1];
+                                _filesToPatch.TryAdd(dirName.Replace("chapter", "Chapter").Replace(pattern.Item2, ""), dirName);
+                            }
+                        }
+                    }
+
+                    foreach (var file in _filesToPatch) {
+                        var dataWin = file.Value == "" ? DataName : Path.Join(file.Value, DataName);
+                        if (_makeBackups) {
+                            MakeBackup(gamePath, dataWin);
+                        }
+                        await ApplyChapterPatch(gamePath, scriptsPath, file.Key, dataWin);
+                    }
+
+                    // TODO: add logic to copy the LayeredFS mod???
+                    break;
+                }
+                case DataWinMode.Windows:
+                default:
+                {
+                    if (_filesToPatch is null)
+                    {
+                        // if it's null, that means the user didn't specify anything with --files, so patch every available file
+                        _filesToPatch = [];
+                        if (File.Exists(Path.Join(gamePath, DataName)))
+                        {
+                            _filesToPatch.TryAdd("Menu", "");
+                        }
+
+                        foreach (var dir in Directory.GetDirectories(gamePath, "chapter?_windows"))
+                        {
+                            if (!File.Exists(Path.Join(dir, DataName)))
                             {
                                 continue;
                             }
-                            _filesToPatch[key] += $".{split[1]}";
-                            match = true;
-                            break;
-                        }
-
-                        if (!match)
-                        {
-                            _filesToPatch.RemoveAt(i);
+                            var dirName = dir.Split(Path.DirectorySeparatorChar)[^1];
+                            _filesToPatch.TryAdd(dirName.Replace("chapter", "Chapter").Replace("_windows", ""), dirName);
                         }
                     }
-                }
-
-                var translatedPath = Path.Join(gamePath, "translated");
-                if (!Directory.Exists(translatedPath))
-                {
-                    Directory.CreateDirectory(translatedPath);
-                }
-
-                foreach (var file in _filesToPatch)
-                {
-                    var fileName = file.Value.Replace(".apk", "").Replace(".pack", "");
-                    var jarOutDir = Path.Join(gamePath, fileName);
-                    var assetsDir = Path.Join(fileName, "assets");
-
-                    if (_makeBackups) {
-                        MakeBackup(gamePath, file.Value);
+                
+                    foreach (var file in _filesToPatch) {
+                        var dataWin = file.Value == "" ? DataName : Path.Join(file.Value, DataName);
+                        if (_makeBackups) {
+                            MakeBackup(gamePath, dataWin);
+                        }
+                        await ApplyChapterPatch(gamePath, scriptsPath, file.Key, dataWin);
                     }
 
-                    RunCommand("java", "-jar " + $"{apktoolPath} d -r \"{Path.Join(gamePath, file.Value)}\" -o \"{jarOutDir}\" -f");
-                    await ApplyChapterPatch(gamePath, scriptsPath, file.Key, $"{Path.Join(assetsDir, DataName)}");
-                    RunCommand("java", "-jar " + $"{apktoolPath} b \"{jarOutDir}\" -o \"{Path.Join(translatedPath, file.Value)}\"");
-
-                    // Theoretically, it shouldn't be read-only, because it was created by "apktool"
-                    DeleteDirectoryNoRO(jarOutDir, true);
+                    break;
                 }
             }
 
